@@ -1,0 +1,19 @@
+# Voice Bridge Research - Dependencies
+
+# Core Dependencies
+sounddevice>=0.4.6
+numpy>=1.24.0
+openai-whisper>=20230314
+requests>=2.31.0
+
+# Metrics & Monitoring
+psutil>=5.9.0
+
+# Data Analysis & Visualization
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Optional: GPU Monitoring
+# Uncomment if you have NVIDIA GPU
+# gputil>=1.4.0

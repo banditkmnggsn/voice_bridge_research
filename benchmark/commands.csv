@@ -1,0 +1,12 @@
+command_id,split,text,intent,query
+C01,original,hello open youtube home,open_youtube_home,
+C02,original,hello play justin bieber,play_youtube,justin bieber
+C03,original,hello find github,search_google,github
+P01,paraphrase,hello take me to youtube,open_youtube_home,
+P02,paraphrase,hello can you show me the youtube homepage,open_youtube_home,
+P03,paraphrase,hello i want to listen to taylor swift,play_youtube,taylor swift
+P04,paraphrase,hello put on some coldplay,play_youtube,coldplay
+P05,paraphrase,hello search for weather in jakarta,search_google,weather in jakarta
+P06,paraphrase,hello look up binus university,search_google,binus university
+P07,paraphrase,hello what is the capital of japan,search_google,capital of japan
+P08,paraphrase,hello i would like to watch bruno mars on youtube,play_youtube,bruno mars

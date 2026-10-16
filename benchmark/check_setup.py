@@ -19,7 +19,7 @@ def check(name, fn):
 
 print(f"Python {sys.version.split()[0]} ({sys.executable})")
 for mod in ("numpy", "scipy", "sounddevice", "psutil", "requests", "pandas",
-            "matplotlib", "torch", "whisper"):
+            "matplotlib", "torch", "whisper", "faster_whisper"):
     check(f"import {mod}", lambda m=mod: getattr(importlib.import_module(m), "__version__", ""))
 
 

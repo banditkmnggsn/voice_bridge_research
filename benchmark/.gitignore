@@ -1,3 +1,4 @@
 dataset/audio/
+audio_device.json
 .env
 __pycache__/

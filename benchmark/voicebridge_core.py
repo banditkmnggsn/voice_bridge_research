@@ -13,8 +13,10 @@ import os
 import re
 import time
 import urllib.parse
+from math import gcd
 
 import numpy as np
+from scipy.signal import resample_poly
 
 import settings as S
 
@@ -79,6 +81,16 @@ def block_volume(block):
     return float(np.linalg.norm(block))
 
 
+def resample_audio(audio, source_rate, target_rate=S.SAMPLE_RATE):
+    """Downsample microphone audio with scipy's anti-aliasing polyphase filter."""
+    if source_rate == target_rate:
+        return np.asarray(audio, dtype=np.float32)
+    divisor = gcd(int(source_rate), int(target_rate))
+    up = int(target_rate) // divisor
+    down = int(source_rate) // divisor
+    return resample_poly(audio, up, down).astype(np.float32)
+
+
 def endpoint_segment(audio, silence_threshold, silence_duration,
                      blocksize=S.BLOCKSIZE, sr=S.SAMPLE_RATE, start_sample=0):
     """Replay the original record_until_silence() logic on a recorded clip,
@@ -141,6 +153,28 @@ def peak_normalize(audio):
     return audio / peak if peak > 0 else audio
 
 
+def zscore_normalize(audio):
+    """Normalize audio using the paper's z-score formula."""
+    if not len(audio):
+        return audio
+    mean = float(np.mean(audio))
+    std = float(np.std(audio))
+    return (audio - mean) / std if std > 0 else audio - mean
+
+
+def normalize_audio(audio, mode):
+    """Apply the configured preprocessing mode, including legacy booleans."""
+    if mode is True:
+        mode = "peak"
+    if mode in (False, None, "none"):
+        return audio
+    if mode == "peak":
+        return peak_normalize(audio)
+    if mode == "zscore":
+        return zscore_normalize(audio)
+    raise ValueError(f"unknown normalization mode: {mode}")
+
+
 # --------------------------------------------------------------------------
 # Transcription
 # --------------------------------------------------------------------------
@@ -148,23 +182,82 @@ def peak_normalize(audio):
 _MODELS = {}
 
 
-def load_model(name):
-    import whisper
-    if name not in _MODELS:
-        _MODELS[name] = whisper.load_model(name, device="cpu")
-    return _MODELS[name]
+def load_model(cfg):
+    """Load and cache the configured Whisper backend and precision."""
+    backend = cfg.get("backend", "openai_whisper")
+    name = cfg["model"]
+    precision = cfg.get("precision", "fp32")
+    key = (backend, name, precision)
+    if key in _MODELS:
+        return _MODELS[key]
+    if backend == "openai_whisper":
+        import whisper
+        model = whisper.load_model(name, device="cpu")
+    elif backend == "faster_whisper":
+        from faster_whisper import WhisperModel
+        model = WhisperModel(name, device="cpu", compute_type=precision,
+                             cpu_threads=cfg.get("cpu_threads", 0))
+    else:
+        raise ValueError(f"unknown transcription backend: {backend}")
+    _MODELS[key] = model
+    return model
 
 
-def transcribe(model, audio, cfg):
+def transcribe(model, audio, cfg, return_info=False):
     audio = audio.flatten().astype("float32")
-    if cfg["normalize"]:
-        audio = peak_normalize(audio).astype("float32")
+    audio = normalize_audio(audio, cfg["normalize"]).astype("float32")
+    timing = {"t_encoder_s": None, "t_decoder_s": None, "n_tokens": None}
+    if cfg.get("backend", "openai_whisper") == "faster_whisper":
+        segments, _ = model.transcribe(
+            audio, language=cfg.get("language", "en"), temperature=0,
+            condition_on_previous_text=False,
+            initial_prompt=cfg.get("vocab_prompt"),
+        )
+        segments = list(segments)
+        text = "".join(segment.text for segment in segments).strip()
+        if return_info:
+            timing["n_tokens"] = sum(len(getattr(segment, "tokens", ()) or ())
+                                     for segment in segments)
+            return text, timing
+        return text
     kwargs = dict(language="en", temperature=0, condition_on_previous_text=False,
                   fp16=False)
     if cfg["vocab_prompt"]:
         kwargs["initial_prompt"] = cfg["vocab_prompt"]
-    result = model.transcribe(audio, **kwargs)
-    return result["text"].strip()
+    hooks = []
+    encoder_elapsed = [0.0]
+    decoder_elapsed = [0.0]
+
+    if return_info and hasattr(model, "encoder") and hasattr(model, "decoder"):
+        # Forward hooks cannot observe the work already completed, so each hook
+        # uses a paired pre-hook/post-hook timer around the module forward pass.
+        def add_timer(module, total):
+            starts = []
+
+            def before(_module, _inputs):
+                starts.append(time.perf_counter())
+
+            def after(_module, _inputs, _output):
+                total[0] += time.perf_counter() - starts.pop()
+
+            hooks.extend([module.register_forward_pre_hook(before),
+                          module.register_forward_hook(after)])
+
+        add_timer(model.encoder, encoder_elapsed)
+        add_timer(model.decoder, decoder_elapsed)
+    try:
+        result = model.transcribe(audio, **kwargs)
+    finally:
+        for hook in hooks:
+            hook.remove()
+    text = result["text"].strip()
+    if return_info:
+        timing["t_encoder_s"] = round(encoder_elapsed[0], 6)
+        timing["t_decoder_s"] = round(decoder_elapsed[0], 6)
+        timing["n_tokens"] = sum(len(segment.get("tokens", ()))
+                                  for segment in result.get("segments", ()))
+        return text, timing
+    return text
 
 
 def split_wake_word(transcript, wake=S.WAKE_WORD):
@@ -226,7 +319,7 @@ LLM_EXAMPLES = [
 
 
 def load_api_key():
-    key = os.environ.get("DEEPSEEK_API_KEY")
+    key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if key:
         return key.strip()
     here = os.path.dirname(os.path.abspath(__file__))
@@ -234,11 +327,25 @@ def load_api_key():
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 for line in f:
-                    if line.strip().startswith("DEEPSEEK_API_KEY="):
+                    if line.strip().startswith(("OPENROUTER_API_KEY=", "DEEPSEEK_API_KEY=")):
                         val = line.split("=", 1)[1].strip().strip('"').strip("'")
                         if val and not val.startswith("PASTE"):
                             return val
     return None
+
+
+def load_env_value(name, default=None):
+    value = os.environ.get(name)
+    if value:
+        return value.strip()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, ".env"), os.path.join(here, "..", ".env")):
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith(name + "="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return default
 
 
 def intent_llm(command, api_key, session=None):
@@ -249,18 +356,34 @@ def intent_llm(command, api_key, session=None):
         messages.append({"role": "user", "content": text})
         messages.append({"role": "assistant", "content": json.dumps(out)})
     messages.append({"role": "user", "content": command})
+    is_openrouter = api_key.startswith("sk-or-")
+    endpoint = load_env_value(
+        "VOICE_BRIDGE_LLM_URL",
+        "https://openrouter.ai/api/v1/chat/completions" if is_openrouter else S.DEEPSEEK_URL,
+    )
+    model = load_env_value(
+        "VOICE_BRIDGE_LLM_MODEL",
+        "deepseek/deepseek-chat" if is_openrouter else S.DEEPSEEK_MODEL,
+    )
     body = {
-        "model": S.DEEPSEEK_MODEL,
+        "model": model,
         "messages": messages,
         "temperature": 0,
         "max_tokens": 60,
         "response_format": {"type": "json_object"},
     }
     http = session or requests
-    info = {"error": "", "prompt_tokens": None, "completion_tokens": None}
+    info = {"error": "", "prompt_tokens": None, "completion_tokens": None,
+            "request_bytes": 0}
     try:
-        r = http.post(S.DEEPSEEK_URL, json=body, timeout=S.DEEPSEEK_TIMEOUT_SEC,
-                      headers={"Authorization": f"Bearer {api_key}"})
+        request_bytes = len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+        info["request_bytes"] = request_bytes
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if is_openrouter:
+            headers["HTTP-Referer"] = "https://github.com/banditkmnggsn/voice_bridge_research"
+            headers["X-Title"] = "VoiceBridge Research"
+        r = http.post(endpoint, json=body, timeout=S.DEEPSEEK_TIMEOUT_SEC,
+                      headers=headers)
         if r.status_code != 200:
             info["error"] = f"HTTP {r.status_code}: {r.text[:120]}"
             return "error", "", info

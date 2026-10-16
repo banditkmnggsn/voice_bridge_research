@@ -1,0 +1,11 @@
+# Benchmark dependencies. Install only at home because PyTorch and Whisper models are large.
+numpy
+scipy
+sounddevice
+psutil
+requests
+pandas
+matplotlib
+torch
+openai-whisper
+faster-whisper

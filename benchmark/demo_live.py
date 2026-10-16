@@ -31,25 +31,26 @@ def main():
     if args.mode == "llm":
         api_key = core.load_api_key()
         if not api_key:
-            raise SystemExit("DEEPSEEK_API_KEY belum diisi di benchmark/.env")
+            raise SystemExit("OPENROUTER_API_KEY atau DEEPSEEK_API_KEY belum diisi di benchmark/.env")
         import requests
         http = requests.Session()
     else:
         http = None
 
     print(f"Memuat Whisper-{cfg['model']} ...")
-    model = core.load_model(cfg["model"])
+    model = core.load_model(cfg)
     core.transcribe(model, np.zeros(S.SAMPLE_RATE, dtype=np.float32), cfg)  # warm-up
 
     q = queue.Queue()
+    source_rate = int(round(sd.query_devices(kind="input")["default_samplerate"]))
 
     def callback(indata, frames, t, status):
-        q.put(indata[:, 0].copy())
+        q.put(core.resample_audio(indata[:, 0], source_rate))
 
     print(f"\nVoiceBridge siap  | {cfg['label']} | intent: {args.mode}")
     print(f"Ucapkan: \"{S.WAKE_WORD} ...\"   (Ctrl+C untuk berhenti)\n")
-    with sd.InputStream(samplerate=S.SAMPLE_RATE, channels=1, dtype="float32",
-                        blocksize=S.BLOCKSIZE, callback=callback):
+    with sd.InputStream(samplerate=source_rate, channels=1, dtype="float32",
+                        callback=callback):
         while True:
             frames, silence_start, heard = [], None, False
             while True:

@@ -42,13 +42,15 @@ DATA = os.path.join(HERE, "dataset")
 RESULTS = os.path.join(HERE, "results")
 
 FIELDS = [
-    "run_id", "timestamp", "repeat", "config", "model", "intent_mode",
+    "run_id", "timestamp", "repeat", "config", "backend", "precision", "model", "intent_mode",
     "clip_id", "command_id", "split", "take", "ground_truth",
     "speech_start_sec", "speech_end_sec", "segment_start_sec", "cut_sec",
     "endpointed", "truncated", "endpoint_wait_s",
     "transcript", "wer", "wake_detected", "command_text",
     "exp_intent", "exp_query", "pred_intent", "pred_query",
     "intent_correct", "query_correct", "task_success",
+    "bytes_sent", "audio_bytes",
+    "t_encoder_s", "t_decoder_s", "n_tokens",
     "t_transcribe_s", "cores_transcribe", "t_intent_s", "t_action_s",
     "latency_after_speech_s", "llm_error", "llm_prompt_tokens",
     "llm_completion_tokens", "model_rss_mb", "process_rss_mb",
@@ -75,7 +77,7 @@ def rss_mb(proc):
     return proc.memory_info().rss / 2 ** 20
 
 
-def environment():
+def environment(requested_threads=None):
     import torch
     import whisper
     try:
@@ -104,6 +106,7 @@ def environment():
         "python": platform.python_version(),
         "torch": torch.__version__,
         "torch_threads": torch.get_num_threads(),
+        "requested_threads": requested_threads,
         "whisper": whisper_ver,
         "device": "cpu",
         "core_sha1": core_sha,
@@ -120,7 +123,17 @@ def main():
     ap.add_argument("--modes", nargs="+", default=S.INTENT_MODES)
     ap.add_argument("--repeats", type=int, default=S.REPEATS)
     ap.add_argument("--limit", type=int, default=0, help="only first N clips (testing)")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="set Torch CPU threads for the benchmark")
     args = ap.parse_args()
+
+    if args.threads is not None:
+        if args.threads < 1:
+            ap.error("--threads must be at least 1")
+        import torch
+        torch.set_num_threads(args.threads)
+        for config in S.CONFIGS.values():
+            config["cpu_threads"] = args.threads
 
     with open(os.path.join(DATA, "manifest.csv"), encoding="utf-8") as f:
         clips = list(csv.DictReader(f))
@@ -136,7 +149,7 @@ def main():
     if "llm" in args.modes:
         api_key = core.load_api_key()
         if not api_key:
-            print("!! DEEPSEEK_API_KEY tidak ditemukan di benchmark/.env -> mode LLM dilewati.")
+            print("!! OPENROUTER_API_KEY/DEEPSEEK_API_KEY tidak ditemukan -> mode LLM dilewati.")
             args.modes = [m for m in args.modes if m != "llm"]
     http = None
     if "llm" in args.modes:
@@ -150,7 +163,7 @@ def main():
 
     os.makedirs(RESULTS, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    env = environment()
+    env = environment(args.threads)
     env["dataset"] = {"clips": len(clips), "mic": session.get("mic"),
                       "calibration": session["calibration"]}
     env["run"] = {"configs": args.configs, "modes": args.modes, "repeats": args.repeats}
@@ -172,13 +185,16 @@ def main():
 
     by_model = {}
     for cfg_name in args.configs:
-        by_model.setdefault(S.CONFIGS[cfg_name]["model"], []).append(cfg_name)
+        cfg = S.CONFIGS[cfg_name]
+        key = (cfg.get("backend", "openai_whisper"), cfg["model"], cfg.get("precision", "fp32"))
+        by_model.setdefault(key, []).append(cfg_name)
 
-    for model_name, cfg_names in by_model.items():
+    for model_key, cfg_names in by_model.items():
+        backend, model_name, precision = model_key
         gc.collect()
         rss_before = rss_mb(proc)
-        print(f"\nMemuat Whisper-{model_name} ...")
-        model = core.load_model(model_name)
+        print(f"\nMemuat {backend} {model_name} ({precision}) ...")
+        model = core.load_model(S.CONFIGS[cfg_names[0]])
         model_rss = rss_mb(proc) - rss_before
         # warm-up so the first measured clip is not penalised by lazy init
         core.transcribe(model, np.zeros(S.SAMPLE_RATE, dtype=np.float32), S.CONFIGS[cfg_names[0]])
@@ -200,14 +216,15 @@ def main():
                                      and ep["cut_sec"] < s_end - 0.05)
 
                     c0, t0 = cpu_seconds(proc), time.perf_counter()
-                    transcript = core.transcribe(model, seg, cfg)
+                    transcript, transcribe_info = core.transcribe(model, seg, cfg, return_info=True)
                     t1, c1 = time.perf_counter(), cpu_seconds(proc)
                     t_tr = t1 - t0
                     cores = (c1 - c0) / t_tr if t_tr > 0 else 0.0
                     wake, command_text = core.split_wake_word(transcript)
 
                     for mode in args.modes:
-                        info = {"error": "", "prompt_tokens": None, "completion_tokens": None}
+                        info = {"error": "", "prompt_tokens": None, "completion_tokens": None,
+                                "request_bytes": 0}
                         if not wake:
                             pred_i, pred_q, t_int = "no_wake_word", "", 0.0
                         elif not command_text:
@@ -233,7 +250,8 @@ def main():
                         writer.writerow({
                             "run_id": run_id,
                             "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
-                            "repeat": rep, "config": cfg_name, "model": model_name,
+                            "repeat": rep, "config": cfg_name, "backend": backend,
+                            "precision": precision, "model": model_name,
                             "intent_mode": mode, "clip_id": clip["clip_id"],
                             "command_id": clip["command_id"], "split": clip["split"],
                             "take": clip["take"], "ground_truth": cmd["text"],
@@ -248,6 +266,11 @@ def main():
                             "pred_intent": pred_i, "pred_query": pred_q,
                             "intent_correct": intent_ok, "query_correct": query_ok,
                             "task_success": bool(intent_ok and query_ok),
+                            "bytes_sent": int(info.get("request_bytes", 0)) if mode == "llm" else 0,
+                            "audio_bytes": int(seg.nbytes),
+                            "t_encoder_s": transcribe_info["t_encoder_s"],
+                            "t_decoder_s": transcribe_info["t_decoder_s"],
+                            "n_tokens": transcribe_info["n_tokens"],
                             "t_transcribe_s": round(t_tr, 4), "cores_transcribe": round(cores, 3),
                             "t_intent_s": round(t_int, 9), "t_action_s": round(t_act, 9),
                             "latency_after_speech_s": None if total is None else round(total, 4),

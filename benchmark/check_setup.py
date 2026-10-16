@@ -71,7 +71,7 @@ def deepseek():
     import voicebridge_core as core
     key = core.load_api_key()
     if not key:
-        raise RuntimeError("DEEPSEEK_API_KEY belum diisi di benchmark/.env")
+        raise RuntimeError("OPENROUTER_API_KEY atau DEEPSEEK_API_KEY belum diisi di benchmark/.env")
     intent, query, info = core.intent_llm("play some jazz music", key)
     if intent == "error":
         raise RuntimeError(info["error"])

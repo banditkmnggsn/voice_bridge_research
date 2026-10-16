@@ -27,6 +27,7 @@ import sounddevice as sd
 from scipy.io import wavfile
 
 import settings as S
+import voicebridge_core as core
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "dataset")
@@ -38,8 +39,8 @@ def load_commands():
         return list(csv.DictReader(f))
 
 
-def record(seconds):
-    audio = sd.rec(int(seconds * S.SAMPLE_RATE), samplerate=S.SAMPLE_RATE,
+def record(seconds, samplerate):
+    audio = sd.rec(int(seconds * samplerate), samplerate=samplerate,
                    channels=S.CHANNELS, dtype="float32")
     sd.wait()
     return audio.flatten()
@@ -52,21 +53,23 @@ def save_wav(path, audio):
         return hashlib.sha1(f.read()).hexdigest()
 
 
-def calibrate():
+def calibrate(source_rate):
     print(f"\nKalibrasi: DIAM selama {S.CALIBRATION_SECONDS:.0f} detik (jangan bicara)...")
     time.sleep(1.0)
-    audio = record(S.CALIBRATION_SECONDS)
+    audio = core.resample_audio(record(S.CALIBRATION_SECONDS, source_rate), source_rate)
     n = len(audio) // S.BLOCKSIZE
     norms = [float(np.linalg.norm(audio[i * S.BLOCKSIZE:(i + 1) * S.BLOCKSIZE])) for i in range(n)]
     rms = float(np.sqrt(np.mean(audio ** 2)))
+    noise_dbfs = float(20.0 * np.log10(rms)) if rms > 0 else float("-inf")
     p95 = float(np.percentile(norms, 95))
-    print(f"  Noise floor: RMS={rms:.5f} | block-norm p95={p95:.4f}")
+    print(f"  Noise floor: RMS={rms:.5f} ({noise_dbfs:.2f} dBFS) | block-norm p95={p95:.4f}")
     lowest = min(c["silence_threshold"] for c in S.CONFIGS.values())
     if p95 >= lowest:
         print(f"  !! Noise ruangan ({p95:.3f}) >= threshold terendah ({lowest}).")
         print("     Deteksi diam bisa tidak pernah aktif. Cari ruangan lebih sepi,")
         print("     matikan kipas/AC, atau kecilkan gain mic, lalu ulangi.")
-    return {"noise_rms": rms, "noise_block_norm_p95": p95,
+        return {"noise_rms": rms, "noise_dbfs": noise_dbfs,
+            "noise_block_norm_p95": p95,
             "noise_block_norm_mean": float(np.mean(norms))}
 
 
@@ -88,9 +91,10 @@ def main():
         print(f"Melanjutkan sesi: {len(done)} klip sudah ada.")
 
     dev = sd.query_devices(kind="input")
+    source_rate = int(round(dev["default_samplerate"]))
     print("=" * 60)
     print("VoiceBridge - sesi rekam dataset")
-    print(f"Mic: {dev['name']}")
+    print(f"Mic: {dev['name']} | native rate: {source_rate} Hz -> {S.SAMPLE_RATE} Hz")
     total = sum(S.TAKES_PER_COMMAND[c["split"]] for c in commands)
     print(f"{len(commands)} perintah, {total} take total, {S.CLIP_SECONDS:.0f} detik per take (+-15 menit)")
     print("Posisi: mulut tepat 50 cm dari mic laptop (ukur pakai meteran), ruangan sepi.")
@@ -102,8 +106,9 @@ def main():
         with open(session_path, encoding="utf-8") as f:
             session = json.load(f)
     if "calibration" not in session:
-        session["calibration"] = calibrate()
+        session["calibration"] = calibrate(source_rate)
         session["mic"] = dev["name"]
+        session["recording_sample_rate"] = source_rate
         session["started_at"] = dt.datetime.now().isoformat(timespec="seconds")
         with open(session_path, "w", encoding="utf-8") as f:
             json.dump(session, f, indent=2)
@@ -113,7 +118,8 @@ def main():
     writer = csv.writer(mf)
     if new_file:
         writer.writerow(["clip_id", "command_id", "split", "take", "text", "file",
-                         "seconds", "peak", "retakes", "sha1", "recorded_at"])
+                 "seconds", "source_sample_rate", "output_sample_rate", "peak",
+                 "retakes", "sha1", "recorded_at"])
 
     rng = random.Random(S.RANDOM_SEED)
     max_takes = max(S.TAKES_PER_COMMAND.values())
@@ -129,7 +135,8 @@ def main():
                 print(f"\n[Putaran {take}/{max_takes}] Ucapkan:  \"{cmd['text']}\"")
                 input("  Tekan ENTER kalau siap...")
                 countdown()
-                audio = record(S.CLIP_SECONDS)
+                recorded = record(S.CLIP_SECONDS, source_rate)
+                audio = core.resample_audio(recorded, source_rate)
                 peak = float(np.max(np.abs(audio)))
                 warn = ""
                 if peak < 0.05:
@@ -149,7 +156,8 @@ def main():
             fname = f"{clip_id}.wav"
             sha = save_wav(os.path.join(AUDIO, fname), audio)
             writer.writerow([clip_id, cmd["command_id"], cmd["split"], take, cmd["text"],
-                             fname, S.CLIP_SECONDS, round(peak, 4), retakes, sha,
+                             fname, S.CLIP_SECONDS, source_rate, S.SAMPLE_RATE, round(peak, 4),
+                             retakes, sha,
                              dt.datetime.now().isoformat(timespec="seconds")])
             mf.flush()
     mf.close()

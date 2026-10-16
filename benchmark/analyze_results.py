@@ -41,7 +41,14 @@ def to_bool(s):
 
 def summarise(df):
     rows = []
-    for (cfg, mode), g0 in df.groupby(["config", "intent_mode"], sort=False):
+    group_columns = ["config", "intent_mode"]
+    for optional in ("backend", "precision"):
+        if optional in df.columns:
+            group_columns.insert(1, optional)
+    for group_key, g0 in df.groupby(group_columns, sort=False):
+        values = dict(zip(group_columns, group_key if isinstance(group_key, tuple) else (group_key,)))
+        cfg = values["config"]
+        mode = values["intent_mode"]
         for split in ["all", "original", "paraphrase"]:
             g = g0 if split == "all" else g0[g0["split"] == split]
             if g.empty:
@@ -55,7 +62,7 @@ def summarise(df):
             lo, hi = wilson(sr, n)
             tot = g["latency_after_speech_s"].dropna()
             rows.append({
-                "config": cfg, "intent_mode": mode, "split": split,
+                **values, "split": split,
                 "n_clips": n, "n_runs": len(g),
                 "task_success_rate": round(sr, 4), "ci95_low": round(lo, 4), "ci95_high": round(hi, 4),
                 "intent_accuracy": round(per_clip["intent"].mean(), 4),
@@ -189,8 +196,9 @@ def main():
     env_path = os.path.join(RESULTS, f"env_{stamp}.json")
     env = json.load(open(env_path, encoding="utf-8")) if os.path.exists(env_path) else {}
 
-    key = summary[summary["split"] == "all"][[
-        "config", "intent_mode", "n_clips", "task_success_rate", "ci95_low", "ci95_high",
+    key_columns = [c for c in ("config", "backend", "precision", "intent_mode") if c in summary.columns]
+    key = summary[summary["split"] == "all"][
+        key_columns + ["n_clips", "task_success_rate", "ci95_low", "ci95_high",
         "wer_mean", "wake_miss_rate", "truncation_rate", "transcribe_mean_s",
         "intent_median_s", "total_mean_s", "total_p95_s", "no_endpoint_runs",
         "cores_transcribe_mean",

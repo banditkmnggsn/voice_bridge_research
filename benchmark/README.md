@@ -1,44 +1,90 @@
-# VoiceBridge benchmark v2
+# VoiceBridge Benchmark v2
 
-Pengukuran ulang VoiceBridge untuk IEEE CITISMA 2026. Folder lama (`deepseek/`, `local_rule/`) **tidak diubah** dan tetap disimpan sebagai arsip.
+Tutorial pengujian yang digunakan untuk melengkapi PPT CITISMA 2026. Semua perintah dijalankan dari folder `benchmark`.
 
-## Cara pakai (double-click berurutan)
+## 1. Siapkan environment
 
-| Langkah | File | Siapa | Waktu |
-|---|---|---|---|
-| 0 | Salin `.env.example` jadi `.env`, lalu tempel API key DeepSeek | Stephen | 1 menit |
-| 1 | `1_cek_setup.bat` (diam 3 detik saat diminta) | otomatis | ±2 menit |
-| 2 | `2_rekam.bat` (rekam 39 klip suara) | **Stephen bicara** | ±15 menit |
-| 3 | `3_benchmark.bat` | otomatis | ±25 menit |
-| 4 | `4_analisis.bat` | otomatis | <1 menit |
-| – | `5_demo_live.bat` (demo pakai mic langsung) | Stephen | – |
+Buat virtual environment dan install dependency dari `requirements.txt` di komputer yang memiliki Python valid. `torch`, Whisper, dan modelnya berukuran besar, jadi lakukan instalasi dengan koneksi yang memadai.
 
-Tips merekam: ruangan sepi, kipas dan AC mati kalau bisa, jarak mulut ke mic laptop **50 cm** (ukur pakai meteran, sama seperti setup di paper), dan bicara dengan tempo normal. Ulangi take hanya kalau ada salah ucap, batuk, atau gangguan suara. Rekaman yang sudah tersimpan aman: kalau script dihentikan, jalankan lagi dan sesi akan dilanjutkan.
+```powershell
+cd benchmark
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
-## Desain eksperimen
+Untuk OpenRouter, salin `.env.example` menjadi `.env` lalu isi key. `.env` sudah di-ignore Git dan tidak boleh di-commit.
 
-- **Dataset:** 11 perintah. 3 perintah dari paper diambil masing-masing 5 take, dan 8 parafrase masing-masing 3 take, jadi totalnya 39 klip WAV (16 kHz). Semua konfigurasi memakai file yang sama persis, jadi inputnya setara.
-- **Konfigurasi:** C1, C2, dan C3 memakai parameter dari paper. C3n adalah ablation (normalisasi saja, tanpa prompt), untuk memisahkan efek masing-masing komponen.
-- **Intent:** rule-based dan DeepSeek dijalankan pada transkrip yang **sama**.
-- **Ulangan:** 3× per klip per konfigurasi, dengan urutan diacak (seed tetap).
-- **Metrik:**
-  - *Task success* = intent benar **dan** query benar. Selang kepercayaan Wilson 95% dihitung per klip.
-  - WER terhadap ground truth.
-  - *Wake-word miss*.
-  - *Truncation*: rekaman terpotong sebelum kalimat selesai.
-  - Latency per tahap, diukur dengan `perf_counter`.
-  - CPU proses (jumlah core yang dipakai saat transkripsi).
-  - Memori model.
-  - Spesifikasi perangkat dicatat otomatis di `results/env_*.json`.
-- **Latency setelah bicara** = tunggu hening + transkripsi + intent + membangun URL. Waktu membuka browser **tidak** termasuk; demo live mengukurnya terpisah.
-- Semua angka ditulis otomatis ke `results/runs_*.csv`. Tidak ada angka yang diketik manual.
+```powershell
+Copy-Item .env.example .env
+```
 
-## Perbedaan dari kode lama (wajib disebut di paper/presentasi)
+## 2. Jalankan pengujian
 
-1. **Vocabulary prompt Config 3 sebelumnya tidak berfungsi.** Kode lama mengirimnya sebagai `prompt=`, padahal `whisper.transcribe()` menimpa parameter itu (lihat `transcribe.py`: `decode_options["prompt"] = all_tokens[...]`). Di v2 prompt dikirim lewat `initial_prompt=`, sehingga benar-benar dipakai.
-2. **Total latency lama tidak memuat transkripsi.** Timer "total" baru dimulai setelah wake word terdeteksi, yaitu setelah transkripsi selesai. Di v2, latency dihitung sejak user berhenti bicara.
-3. **CPU lama diukur di level sistem** (`psutil.cpu_percent()`), dan diambil setelah browser dibuka. Di v2, yang diukur adalah CPU proses VoiceBridge saat transkripsi.
-4. **Rule-based lama memetakan "find" ke putar YouTube.** Di v2, "find", "search", dan "look up" dipetakan ke Google search, sesuai deskripsi paper.
-5. **Ukuran blok audio dikunci** ke nilai default driver di PC ini, yang diukur oleh `check_setup.py` dan disimpan di `audio_device.json`. Dengan begitu, threshold hening punya arti yang tetap.
-6. **Folder `deepseek/` lama tidak berisi pemanggilan DeepSeek.** Kodenya identik dengan `local_rule/`. Di v2, integrasi DeepSeek ditulis ulang di `voicebridge_core.py` (`deepseek-chat`, temperature 0, output JSON, 3 contoh few-shot).
-7. **Sistem berjalan sebagai aplikasi Python lokal di CPU**, bukan TensorFlow.js di browser seperti yang tertulis di paper.
+Jalankan berurutan:
+
+```powershell
+.\1_cek_setup.bat
+.\2_rekam.bat
+.\3_benchmark.bat
+.\4_analisis.bat
+```
+
+Keterangan:
+
+- `1_cek_setup.bat`: memeriksa microphone, dependency, model, dan koneksi LLM.
+- `2_rekam.bat`: merekam 39 klip berdasarkan `commands.csv`. Rekaman diambil pada sample rate microphone lalu di-resample ke 16 kHz.
+- `3_benchmark.bat`: menjalankan semua konfigurasi dan parser pada dataset yang sama.
+- `4_analisis.bat`: membuat tabel ringkasan, laporan Markdown, dan grafik.
+
+Untuk menguji rule-based saja tanpa request jaringan:
+
+```powershell
+python run_benchmark.py --modes rule
+```
+
+Untuk membatasi pengujian saat debugging:
+
+```powershell
+python run_benchmark.py --modes rule --configs C1 --repeats 1 --limit 3 --threads 4
+```
+
+## 3. Konfigurasi dan data
+
+Konfigurasi transcription ada di `settings.py`:
+
+- C1-C3/C3n/C3z: OpenAI Whisper FP32.
+- C4: faster-whisper tiny INT8.
+- C5: faster-whisper base INT8.
+
+Parser intent adalah `rule` dan `llm`. Mode `llm` memakai OpenRouter untuk key `sk-or-...`; mode `rule` tidak mengirim audio atau request jaringan.
+
+Dataset berisi 11 perintah: 3 perintah original dengan 5 take dan 8 parafrase dengan 3 take, total 39 klip. Jangan mengubah `commands.csv` setelah recording dimulai.
+
+## 4. Hasil pengujian
+
+File dibuat di `results/`:
+
+- `runs_*.csv`: data mentah per clip, konfigurasi, parser, WER, task success, latency, memory, precision, dan metadata privasi.
+- `summary_*.csv`: ringkasan per konfigurasi, backend, precision, parser, dan split dataset.
+- `report_*.md`: laporan yang siap diperiksa.
+- `latency_*.png` dan `success_*.png`: grafik hasil.
+- `env_*.json`: hardware, software, thread, dan parameter eksperimen.
+
+Jangan mengetik atau mengubah angka hasil secara manual. Isi slide PPT hanya dari file hasil benchmark.
+
+## 5. Kondisi rekaman
+
+Gunakan ruangan tenang, matikan kipas/AC bila memungkinkan, dan jaga jarak mulut ke microphone sekitar 50 cm. Ucapkan setiap perintah sekali dengan tempo normal. Retake hanya jika salah ucap, batuk, atau ada gangguan suara. Jika proses dihentikan, jalankan `2_rekam.bat` lagi untuk melanjutkan klip yang belum tersimpan.
+
+## 6. Demo live
+
+Setelah setup selesai:
+
+```powershell
+.\5_demo_live.bat
+```
+
+Demo membuka browser setelah intent dikenali. Waktu membuka browser dipisahkan dari latency benchmark utama.
+
+Untuk status kesesuaian implementasi dengan PPT, lihat `../PPT_ALIGNMENT_CHECKLIST.md`.

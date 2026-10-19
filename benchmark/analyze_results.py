@@ -74,6 +74,14 @@ def summarise(df):
                 "transcribe_median_s": round(g["t_transcribe_s"].median(), 4),
                 "transcribe_p95_s": round(g["t_transcribe_s"].quantile(0.95), 4),
                 "transcribe_std_s": round(g["t_transcribe_s"].std(), 4),
+                "cpu_process_raw_peak_mean": round(g["cpu_process_raw_peak_percent"].mean(), 2),
+                "cpu_process_normalized_peak_mean": round(
+                    g["cpu_process_normalized_peak_percent"].mean(), 2),
+                "cpu_process_average_mean": round(g["cpu_process_average_percent"].mean(), 2),
+                "cpu_process_average_normalized_mean": round(
+                    g["cpu_process_average_normalized_percent"].mean(), 2),
+                "cpu_system_peak_mean": round(g["cpu_system_peak_percent"].mean(), 2),
+                "peak_rss_mean_mb": round(g["peak_rss_mb"].mean(), 1),
                 "intent_mean_s": round(g["t_intent_s"].mean(), 6),
                 "intent_median_s": round(g["t_intent_s"].median(), 6),
                 "intent_p95_s": round(g["t_intent_s"].quantile(0.95), 6),
@@ -200,6 +208,9 @@ def main():
     key = summary[summary["split"] == "all"][
         key_columns + ["n_clips", "task_success_rate", "ci95_low", "ci95_high",
         "wer_mean", "wake_miss_rate", "truncation_rate", "transcribe_mean_s",
+        "cpu_process_raw_peak_mean", "cpu_process_normalized_peak_mean",
+        "cpu_process_average_mean", "cpu_process_average_normalized_mean",
+        "cpu_system_peak_mean", "peak_rss_mean_mb",
         "intent_median_s", "total_mean_s", "total_p95_s", "no_endpoint_runs",
         "cores_transcribe_mean",
         "model_rss_mb", "llm_errors"]]

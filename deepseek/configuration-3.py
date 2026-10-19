@@ -9,7 +9,7 @@ import requests
 import re
 from metrics_monitor import MetricsMonitor
 
-WAKE_WORD = "hello"
+WAKE_WORD = "hey voice bridge"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 SILENCE_THRESHOLD = 0.15
@@ -64,7 +64,7 @@ def transcribe(audio_np):
         language="en",
         temperature=0,
         condition_on_previous_text=False,
-        prompt="play youtube despacito hello music video search google"
+        prompt="play youtube despacito hey voice bridge music video search google"
     )
     metrics.end_transcription()
     return result["text"].lower().strip()

@@ -263,10 +263,14 @@ def transcribe(model, audio, cfg, return_info=False):
 def split_wake_word(transcript, wake=S.WAKE_WORD):
     """Returns (wake_detected, command_text)."""
     norm = normalize_text(transcript)
-    if wake not in norm.split():
+    wake_tokens = normalize_text(wake).split()
+    transcript_tokens = norm.split()
+    if not wake_tokens:
         return False, ""
-    idx = norm.split().index(wake)
-    return True, " ".join(norm.split()[idx + 1:])
+    for index in range(len(transcript_tokens) - len(wake_tokens) + 1):
+        if transcript_tokens[index:index + len(wake_tokens)] == wake_tokens:
+            return True, " ".join(transcript_tokens[index + len(wake_tokens):])
+    return False, ""
 
 
 # --------------------------------------------------------------------------

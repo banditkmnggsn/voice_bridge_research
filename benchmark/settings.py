@@ -23,7 +23,7 @@ if _os.path.exists(_dev_file):
     with open(_dev_file, encoding="utf-8") as _f:
         BLOCKSIZE = int(_json.load(_f)["blocksize"])
 
-WAKE_WORD = "hello"
+WAKE_WORD = "hey voice bridge"
 
 # Segment start used when replaying a recorded clip through the endpointing
 # logic: the live loop would have started the segment shortly before speech.
@@ -37,13 +37,16 @@ CALIBRATION_SECONDS = 3.0
 # Benchmark
 REPEATS = 3                  # latency repeats per clip per configuration
 RANDOM_SEED = 2026
+BENCHMARK_THREADS = 2
+BENCHMARK_NOISE_MULTIPLIER = 2.5
+BENCHMARK_SILENCE_DURATION = 0.6
 
 # Configurations. C1-C3 reproduce the paper's parameters.
 # NOTE on C3's vocabulary prompt: the original code passed it as `prompt=`,
 # which openai-whisper's transcribe() silently overwrites (transcribe.py,
 # decode_options["prompt"] = all_tokens[...]). v2 passes it as
 # `initial_prompt=`, which is the supported way, so the prompt is actually used.
-VOCAB_PROMPT = "play youtube despacito hello music video search google"
+VOCAB_PROMPT = "play youtube despacito hey voice bridge music video search google"
 
 CONFIGS = {
     "C1": {

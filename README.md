@@ -26,7 +26,7 @@ PPT_ALIGNMENT_CHECKLIST.md  # status kesesuaian code dengan PPT
 Semua angka utama untuk PPT dibuat oleh benchmark v2. Detail prosedur dan command ada di [benchmark/guide.md](benchmark/guide.md).
 
 - **WER:** reference berasal dari `commands.csv[text]`, hypothesis berasal dari transcript Whisper. Keduanya dinormalisasi lalu dibandingkan dengan dynamic programming pada seluruh kata. `WER = (substitution + deletion + insertion) / jumlah kata reference`.
-- **Endpointing:** audio dimulai dari `segment_start_sec` dengan pre-roll sebelum speech. Audio berhenti di `cut_sec` setelah volume berada di bawah threshold selama `silence_duration`. `endpoint_wait_s` adalah waktu dari blok keras terakhir sampai endpoint berhenti.
+- **Endpointing benchmark:** setiap clip dipotong satu kali sebelum loop konfigurasi. Threshold bersama adalah `2.5 x noise_block_norm_p95` dan silence duration bersama `0.6 s`, sehingga C1-C5 menerima segment audio identik. Threshold/silence per-config hanya dipakai demo live. `endpoint_wait_s` adalah waktu dari blok keras terakhir sampai endpoint berhenti.
 - **Transcription latency:** dimulai tepat sebelum `core.transcribe()` dan berhenti ketika transcript selesai. Ini mencakup preprocessing dan inferensi Whisper, tetapi tidak mencakup endpointing, intent, atau browser.
 - **Encoder/decoder:** forward hook mengukur `model.encoder` dan `model.decoder` OpenAI Whisper selama transkripsi. `n_tokens` berasal dari token segment hasil Whisper.
 - **Intent latency:** dimulai sebelum `intent_rule()` atau `intent_llm()` dan berhenti setelah intent/query dikembalikan. Transkripsi dan browser tidak termasuk.

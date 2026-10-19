@@ -6,17 +6,17 @@ import time
 
 GROUND_TRUTH_COMMANDS = [
     {
-        "ground_truth": "hello open youtube home",
+        "ground_truth": "hey voice bridge open youtube home",
         "intent": "open_youtube_home",
         "query": ""
     },
     {
-        "ground_truth": "hello play justin bieber",
+        "ground_truth": "hey voice bridge play justin bieber",
         "intent": "play_youtube",
         "query": "justin bieber"
     },
     {
-        "ground_truth": "hello search binusmaya",
+        "ground_truth": "hey voice bridge search binusmaya",
         "intent": "search_google",
         "query": "binusmaya"
     }
@@ -66,7 +66,7 @@ def run_wer_experiment():
 
             # ================= LOGGING =================
             metrics.log_session(
-                wake_word="hello",
+                wake_word="hey voice bridge",
                 transcribed_text=transcribed_text,
                 command=cmd["ground_truth"],
                 intent=cmd["intent"],

@@ -1,4 +1,7 @@
 dataset/audio/
+dataset/manifest.csv
+dataset/session.json
+results/
 audio_device.json
 .env
 __pycache__/

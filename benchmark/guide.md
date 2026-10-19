@@ -61,7 +61,7 @@ Kondisi recording:
 
 ### Step 3: benchmark
 
-Semua konfigurasi memakai file audio yang sama.
+Semua konfigurasi memakai file audio yang sama. Benchmark memotong setiap clip satu kali sebelum loop konfigurasi; threshold endpoint benchmark adalah `2.5 x noise_block_norm_p95` dari kalibrasi dan silence duration bersama adalah `0.6 s`. Threshold/silence per-config pada `settings.py` hanya digunakan oleh demo live.
 
 ```powershell
 .\3_benchmark.bat
@@ -89,7 +89,7 @@ Contoh command:
 ```powershell
 python run_benchmark.py --modes rule
 python run_benchmark.py --modes llm
-python run_benchmark.py --configs C1 C4 --modes rule --repeats 1 --limit 3 --threads 4
+python run_benchmark.py --configs C1 C4 --modes rule --repeats 1 --limit 3 --threads 2
 ```
 
 `--limit` dan `--repeats 1` hanya untuk smoke test. Untuk angka PPT, gunakan dataset penuh dan repeat default.
@@ -148,13 +148,22 @@ Code menggunakan dynamic programming Levenshtein pada seluruh range kata referen
 
 ### 3.3 Wake-word dan command
 
-Whisper menghasilkan transcript penuh. `split_wake_word()` menormalisasi transcript lalu mencari token `hello`.
+Whisper menghasilkan transcript penuh. `split_wake_word()` menormalisasi transcript lalu mencari frasa `hey voice bridge`.
 
-- Sebelum token `hello`: dianggap bagian wake-word/transcript.
-- Setelah token `hello`: menjadi `command_text`.
-- Jika `hello` tidak ditemukan, `wake_detected=False`, intent tidak dijalankan, dan hasil dicatat sebagai `no_wake_word`.
+- Sebelum frasa `hey voice bridge`: dianggap bagian wake-word/transcript.
+- Setelah frasa `hey voice bridge`: menjadi `command_text`.
+- Jika frasa tersebut tidak ditemukan, `wake_detected=False`, intent tidak dijalankan, dan hasil dicatat sebagai `no_wake_word`.
 
 ### 3.4 Endpointing dan truncation
+
+`run_benchmark.py` memanggil `endpoint_segment()` satu kali untuk setiap clip, sebelum C1-C5 dijalankan. Segment hasilnya disimpan di `prepared_clips` dan object audio yang sama diberikan ke setiap konfigurasi dan repeat. Ini mencegah C1 dan C2 memiliki panjang input berbeda hanya karena threshold silence masing-masing.
+
+Threshold benchmark dihitung sebagai:
+
+```text
+benchmark_threshold = 2.5 x noise_block_norm_p95
+benchmark_silence_duration = 0.6 s
+```
 
 `endpoint_segment()` memproses audio dari `segment_start_sec` dengan blok audio sebesar `BLOCKSIZE`.
 
@@ -164,6 +173,8 @@ Recording berhenti ketika volume L2 sebuah blok berada di bawah `silence_thresho
 - `cut_sec`: akhir segment yang dikirim ke Whisper.
 - `endpoint_wait_s`: `cut_sec - last_loud_sec`, yaitu waktu tunggu setelah blok keras terakhir sampai endpoint berhenti.
 - `truncated=True` jika endpoint berhenti lebih dari 0.05 detik sebelum `speech_end_sec` referensi.
+
+Pada `demo_live.py`, threshold dan silence duration per-config tetap digunakan karena demo harus merespons secara langsung. Nilainya tidak digunakan untuk endpointing benchmark utama.
 
 ### 3.5 Transcription latency
 
@@ -225,18 +236,18 @@ Query dinilai cocok jika semua content word dari expected query ada pada predict
 
 ### 3.10 CPU dan memory
 
-CPU transcription memakai selisih process CPU time dari `psutil.Process().cpu_times()` sebelum dan sesudah transcription:
+Selama `core.transcribe()` saja, `ResourceSampler` berjalan di background thread setiap 75 ms. Sampler mengagregasi process utama dan child process dari `psutil.Process(os.getpid())`.
 
-```text
-cores_transcribe = process_cpu_seconds / t_transcribe_s
-```
+CSV menyimpan:
 
-Ini adalah estimasi jumlah core yang digunakan proses, bukan persentase CPU seluruh sistem.
+- `cpu_process_raw_peak_percent`: peak CPU process-tree mentah; dapat lebih dari 100% saat memakai beberapa core.
+- `cpu_process_normalized_peak_percent`: peak CPU process-tree dibagi jumlah logical core, dibatasi 0-100%.
+- `cpu_system_peak_percent`: peak CPU seluruh sistem, hanya indikator gangguan aplikasi lain.
+- `peak_rss_mb`: peak RSS process-tree selama transcription.
 
-Memory:
+`cores_transcribe` adalah nilai kompatibilitas yang diturunkan dari CPU process raw peak, bukan pengukuran system-wide. Waktu model loading dan warm-up tidak masuk latency atau resource per clip. Setiap config mendapat satu warm-up yang tidak ditulis ke CSV.
 
-- `model_rss_mb`: kenaikan RSS proses setelah model backend dimuat.
-- `process_rss_mb`: RSS proses saat satu baris hasil ditulis.
+Memory model tetap dicatat sebagai `model_rss_mb`, yaitu kenaikan RSS saat model backend dimuat. `process_rss_mb` adalah alias kompatibilitas yang berisi nilai `peak_rss_mb`.
 
 Spesifikasi CPU, RAM, OS, Python, Torch, Whisper, thread, backend, dan konfigurasi dicatat dalam `env_*.json`.
 

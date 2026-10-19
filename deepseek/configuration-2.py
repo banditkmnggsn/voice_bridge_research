@@ -9,7 +9,7 @@ import requests
 import re
 from metrics_monitor import MetricsMonitor
 
-WAKE_WORD = "hello"
+WAKE_WORD = "hey voice bridge"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 SILENCE_THRESHOLD = 0.15

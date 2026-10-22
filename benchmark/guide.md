@@ -103,7 +103,7 @@ python run_benchmark.py --configs C1 C4 --modes rule --repeats 1 --limit 3 --thr
 Output dibuat di `results/`:
 
 - `runs_*.csv`: data mentah setiap kombinasi clip/config/parser/repeat.
-- `summary_*.csv`: rata-rata dan ringkasan per config/backend/precision/parser.
+- `summary_*.csv`: rata-rata dan ringkasan per config/backend/precision/parser, termasuk CPU peak/average dan peak RSS.
 - `report_*.md`: laporan hasil.
 - `latency_*.png`: breakdown latency.
 - `success_*.png`: task success dengan Wilson 95% confidence interval.
@@ -236,16 +236,36 @@ Query dinilai cocok jika semua content word dari expected query ada pada predict
 
 ### 3.10 CPU dan memory
 
+Setiap grup model dijalankan dalam subprocess Python baru. Grup yang dipisahkan adalah OpenAI Whisper base, OpenAI Whisper tiny, faster-whisper tiny INT8, dan faster-whisper base INT8. Parent process hanya menggabungkan CSV worker, sehingga RSS antar-model tidak tercampur.
+
 Selama `core.transcribe()` saja, `ResourceSampler` berjalan di background thread setiap 75 ms. Sampler mengagregasi process utama dan child process dari `psutil.Process(os.getpid())`.
 
 CSV menyimpan:
 
 - `cpu_process_raw_peak_percent`: peak CPU process-tree mentah; dapat lebih dari 100% saat memakai beberapa core.
 - `cpu_process_normalized_peak_percent`: peak CPU process-tree dibagi jumlah logical core, dibatasi 0-100%.
+- `cpu_process_average_percent`: `(process_cpu_time_after - process_cpu_time_before) / transcription_wall_time x 100`.
+- `cpu_process_average_normalized_percent`: CPU average raw dibagi 12 logical core pada mesin ini, dibatasi 0-100%. Ini bukan dibagi 4 P-core; affinity P-core dan denominator normalisasi adalah dua hal berbeda.
 - `cpu_system_peak_percent`: peak CPU seluruh sistem, hanya indikator gangguan aplikasi lain.
 - `peak_rss_mb`: peak RSS process-tree selama transcription.
 
 `cores_transcribe` adalah nilai kompatibilitas yang diturunkan dari CPU process raw peak, bukan pengukuran system-wide. Waktu model loading dan warm-up tidak masuk latency atau resource per clip. Setiap config mendapat satu warm-up yang tidak ditulis ke CSV.
+
+Benchmark standard memakai 2 thread. Nilai `run.threads`, `requested_threads`, dan `torch_threads` ditulis di `env_*.json`; faster-whisper menerima nilai yang sama sebagai `cpu_threads`.
+
+Pada Windows hybrid CPU, benchmark mendeteksi logical index P-core melalui Windows CPU Set API, membatasi affinity setiap parent/worker process ke P-core tersebut, dan menyimpan `p_core_indices`, `efficiency_class`, serta `applied_affinity` di `env_*.json`.
+
+Semua backend memakai decoding greedy. OpenAI Whisper tidak diberi `beam_size`; faster-whisper diberi `beam_size=1`, `best_of=1`, dan `vad_filter=False`. Nilai `DECODING="greedy"` dicatat di environment.
+
+Untuk output terpisah saat validasi:
+
+```powershell
+python run_benchmark.py --test --modes rule --repeats 1 --limit 3
+python analyze_results.py --test
+python validate_run.py --test
+```
+
+`validate_run.py` bersifat read-only dan hanya membaca hasil yang sudah ada.
 
 Memory model tetap dicatat sebagai `model_rss_mb`, yaitu kenaikan RSS saat model backend dimuat. `process_rss_mb` adalah alias kompatibilitas yang berisi nilai `peak_rss_mb`.
 

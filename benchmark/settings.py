@@ -38,6 +38,7 @@ CALIBRATION_SECONDS = 3.0
 REPEATS = 3                  # latency repeats per clip per configuration
 RANDOM_SEED = 2026
 BENCHMARK_THREADS = 2
+DECODING = "greedy"
 BENCHMARK_NOISE_MULTIPLIER = 2.5
 BENCHMARK_SILENCE_DURATION = 0.6
 

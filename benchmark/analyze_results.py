@@ -7,9 +7,10 @@ Outputs (in results/):
   latency_<stamp>.png      where the waiting time goes, per config and mode
   success_<stamp>.png      task success rate with 95% confidence intervals
 
-Usage: python analyze_results.py [results/runs_XXXX.csv]   (default: latest)
+Usage: python analyze_results.py [results/runs_XXXX.csv] [--test]   (default: latest)
 """
 
+import argparse
 import glob
 import json
 import math
@@ -186,22 +187,29 @@ def md_table(df):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else None
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", nargs="?", help="runs CSV path")
+    ap.add_argument("--test", action="store_true", help="use results/_test")
+    args = ap.parse_args()
+    output_dir = os.path.join(RESULTS, "_test") if args.test else RESULTS
+    path = args.path
     if not path:
-        files = sorted(glob.glob(os.path.join(RESULTS, "runs_*.csv")))
+        files = sorted(glob.glob(os.path.join(output_dir, "runs_*.csv")))
         if not files:
-            print("Belum ada results/runs_*.csv. Jalankan 3_benchmark.bat dulu.")
+            print(f"Belum ada {output_dir}/runs_*.csv. Jalankan benchmark dulu.")
             return 1
         path = files[-1]
+    path = os.path.abspath(path)
+    output_dir = os.path.dirname(path)
     stamp = os.path.basename(path)[len("runs_"):-len(".csv")]
     df = pd.read_csv(path)
     for c in ("endpointed", "truncated", "wake_detected", "intent_correct",
               "query_correct", "task_success"):
         df[c] = to_bool(df[c])
     summary = summarise(df)
-    summary.to_csv(os.path.join(RESULTS, f"summary_{stamp}.csv"), index=False)
+    summary.to_csv(os.path.join(output_dir, f"summary_{stamp}.csv"), index=False)
 
-    env_path = os.path.join(RESULTS, f"env_{stamp}.json")
+    env_path = os.path.join(output_dir, f"env_{stamp}.json")
     env = json.load(open(env_path, encoding="utf-8")) if os.path.exists(env_path) else {}
 
     key_columns = [c for c in ("config", "backend", "precision", "intent_mode") if c in summary.columns]
@@ -236,11 +244,11 @@ def main():
              "Definitions: task success = correct intent AND correct query. "
              "Latency = wait for silence + transcription + intent + building the URL "
              "(browser launch excluded). CI = Wilson 95% interval over clips."]
-    with open(os.path.join(RESULTS, f"report_{stamp}.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, f"report_{stamp}.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    plot_latency(summary, os.path.join(RESULTS, f"latency_{stamp}.png"))
-    plot_success(summary, os.path.join(RESULTS, f"success_{stamp}.png"))
+    plot_latency(summary, os.path.join(output_dir, f"latency_{stamp}.png"))
+    plot_success(summary, os.path.join(output_dir, f"success_{stamp}.png"))
 
     pd.set_option("display.width", 200)
     print(key.to_string(index=False))

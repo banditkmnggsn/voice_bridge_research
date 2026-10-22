@@ -62,6 +62,7 @@ FIELDS = [
     "t_intent_s", "t_action_s",
     "latency_after_speech_s", "llm_error", "llm_prompt_tokens",
     "llm_completion_tokens", "model_rss_mb", "process_rss_mb",
+    "baseline_rss_mb", "compute_type_effective", "cores_average",
 ]
 
 
@@ -105,17 +106,63 @@ def detect_p_cores():
         if size < 8 or offset + size > required.value:
             break
         if record_type == 0 and size >= 20:
-            logical_index = buffer[offset + 14]
-            efficiency_class = buffer[offset + 18]
+            logical_index = buffer[offset + 14][0]
+            efficiency_class = buffer[offset + 18][0]
             records.append((logical_index, efficiency_class))
         offset += size
     if not records:
         raise RuntimeError("No Windows CPU Set records were returned")
-    best_class = min(efficiency for _, efficiency in records)
+    # Windows assigns the higher EfficiencyClass to the performance cores.
+    best_class = max(efficiency for _, efficiency in records)
     return [index for index, efficiency in records if efficiency == best_class], {
         "efficiency_class": best_class,
         "all_cpu_efficiency_classes": {str(index): efficiency for index, efficiency in records},
     }
+
+
+class PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+    _fields_ = [("Version", ctypes.c_ulong),
+                ("ControlMask", ctypes.c_ulong),
+                ("StateMask", ctypes.c_ulong)]
+
+
+def disable_power_throttling():
+    """Opt this process out of EcoQoS so Windows does not slow it down."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetProcessInformation.restype = wintypes.BOOL
+        # Version=1, ControlMask=EXECUTION_SPEED, StateMask=0 -> throttling off.
+        state = PROCESS_POWER_THROTTLING_STATE(1, 0x1, 0)
+        ok = kernel32.SetProcessInformation(
+            kernel32.GetCurrentProcess(), 4, ctypes.byref(state), ctypes.sizeof(state))
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return True
+    except Exception as exc:
+        print(f"!! Peringatan: gagal mematikan power throttling: {exc}")
+        return False
+
+
+def set_execution_state(flags):
+    """Call SetThreadExecutionState; print a warning instead of failing."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetThreadExecutionState.argtypes = [ctypes.c_uint32]
+        kernel32.SetThreadExecutionState.restype = ctypes.c_uint32
+        if not kernel32.SetThreadExecutionState(flags):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return True
+    except Exception as exc:
+        print(f"!! Peringatan: SetThreadExecutionState(0x{flags:08X}) gagal: {exc}")
+        return False
 
 
 def apply_p_core_affinity():
@@ -142,12 +189,16 @@ class ResourceSampler:
         self.cpu_process_end = 0.0
         self.wall_start = 0.0
         self.wall_end = 0.0
+        self.processes = []
 
-    def _process_tree(self):
+    def _enumerate_process_tree(self):
         try:
             return [self.root] + self.root.children(recursive=True)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return [self.root]
+
+    def _process_tree(self):
+        return self.processes
 
     def _sample(self):
         processes = self._process_tree()
@@ -178,6 +229,7 @@ class ResourceSampler:
             self._sample()
 
     def __enter__(self):
+        self.processes = self._enumerate_process_tree()
         self.cpu_process_start = self._cpu_seconds()
         self.wall_start = time.perf_counter()
         for process in self._process_tree():
@@ -248,7 +300,7 @@ def environment(requested_threads=None):
         "core_sha1": core_sha,
         "settings": {k: getattr(S, k) for k in (
             "SAMPLE_RATE", "BLOCKSIZE", "PRE_ROLL_SEC", "REPEATS", "RANDOM_SEED",
-            "BENCHMARK_THREADS", "BENCHMARK_NOISE_MULTIPLIER",
+            "BENCHMARK_THREADS", "DECODING", "BENCHMARK_NOISE_MULTIPLIER",
             "BENCHMARK_SILENCE_DURATION",
             "DEEPSEEK_MODEL")},
         "configs": S.CONFIGS,
@@ -265,18 +317,32 @@ def model_groups(config_names):
     return list(groups.values())
 
 
-def run_subprocesses(args, clips, session, benchmark_threshold, affinity):
+def effective_compute_type(model, cfg):
+    if cfg.get("backend", "openai_whisper") != "faster_whisper":
+        return cfg.get("precision", "fp32")
+    backend_model = getattr(model, "model", None)
+    compute_type = getattr(backend_model, "compute_type", None)
+    if compute_type is not None:
+        return str(compute_type)
+    import ctranslate2
+    return ",".join(sorted(ctranslate2.get_supported_compute_types("cpu")))
+
+
+def run_subprocesses(args, clips, session, benchmark_threshold, affinity, power_throttling):
     """Run one fresh Python process per backend/model/precision group."""
     os.makedirs(RESULTS, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     env = environment(args.threads)
     env["affinity"] = affinity
+    env["power_throttling_disabled"] = power_throttling
+    env["power_throttling_detail"] = {"parent": power_throttling, "workers": {}}
     env["dataset"] = {"clips": len(clips), "mic": session.get("mic"),
                       "calibration": session["calibration"]}
     groups = model_groups(args.configs)
     env["run"] = {
         "configs": args.configs, "modes": args.modes, "repeats": args.repeats,
-        "threads": args.threads, "subprocess_groups": groups,
+        "threads": args.threads, "decoding": S.DECODING,
+        "subprocess_groups": groups,
         "endpoint_threshold": benchmark_threshold,
         "endpoint_noise_multiplier": S.BENCHMARK_NOISE_MULTIPLIER,
         "endpoint_silence_duration": S.BENCHMARK_SILENCE_DURATION,
@@ -289,15 +355,32 @@ def run_subprocesses(args, clips, session, benchmark_threshold, affinity):
     worker_dir = os.path.join(RESULTS, f".workers_{stamp}")
     os.makedirs(worker_dir, exist_ok=True)
     worker_paths = []
+    merge_succeeded = False
+    failed_group = None
     try:
         for index, group in enumerate(groups):
             worker_path = os.path.join(worker_dir, f"group_{index}.csv")
+            failed_group = group
             command = [sys.executable, os.path.abspath(__file__), "--worker",
                        "--configs", *group, "--modes", *args.modes,
                        "--repeats", str(args.repeats), "--limit", str(args.limit),
                        "--threads", str(args.threads), "--worker-output", worker_path]
+            if args.test:
+                command.append("--test")
             subprocess.run(command, cwd=HERE, check=True)
             worker_paths.append(worker_path)
+            worker_throttling = False
+            try:
+                with open(worker_path + ".meta.json", encoding="utf-8") as meta_file:
+                    worker_throttling = bool(json.load(meta_file)["power_throttling_disabled"])
+            except (OSError, ValueError, KeyError):
+                pass
+            env["power_throttling_detail"]["workers"][f"group_{index}"] = worker_throttling
+
+        env["power_throttling_disabled"] = bool(
+            power_throttling and all(env["power_throttling_detail"]["workers"].values()))
+        with open(env_path, "w", encoding="utf-8") as output:
+            json.dump(env, output, indent=2)
 
         output_path = os.path.join(RESULTS, f"runs_{stamp}.csv")
         run_id = 0
@@ -310,11 +393,16 @@ def run_subprocesses(args, clips, session, benchmark_threshold, affinity):
                         run_id += 1
                         row["run_id"] = run_id
                         writer.writerow(row)
+        merge_succeeded = True
         print(f"\nSelesai. Data mentah: {output_path}")
         print(f"Environment: {env_path}")
         return 0
+    except subprocess.CalledProcessError:
+        print(f"Worker gagal untuk grup {failed_group}. CSV worker tersimpan di: {worker_dir}")
+        raise
     finally:
-        shutil.rmtree(worker_dir, ignore_errors=True)
+        if merge_succeeded:
+            shutil.rmtree(worker_dir, ignore_errors=True)
 
 
 def main():
@@ -327,9 +415,19 @@ def main():
                     help="set the same CPU thread count for every config")
     ap.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--worker-output", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--test", action="store_true", help="write outputs under results/_test")
     args = ap.parse_args()
 
-    if args.threads is not None:
+    # Before any model is loaded, in the parent and in every worker.
+    power_throttling = disable_power_throttling()
+    if args.worker and args.worker_output:
+        with open(args.worker_output + ".meta.json", "w", encoding="utf-8") as meta_file:
+            json.dump({"power_throttling_disabled": power_throttling}, meta_file)
+
+    worker_has_openai = any(
+        S.CONFIGS[name].get("backend", "openai_whisper") == "openai_whisper"
+        for name in args.configs)
+    if args.threads is not None and (not args.worker or worker_has_openai):
         if args.threads < 1:
             ap.error("--threads must be at least 1")
         import torch
@@ -352,8 +450,17 @@ def main():
         clips = clips[: args.limit]
 
     affinity = apply_p_core_affinity()
+    if args.test:
+        global RESULTS
+        RESULTS = os.path.join(HERE, "results", "_test")
     if not args.worker:
-        return run_subprocesses(args, clips, session, benchmark_threshold, affinity)
+        # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED: no sleep during the run.
+        set_execution_state(0x80000003)
+        try:
+            return run_subprocesses(args, clips, session, benchmark_threshold, affinity,
+                                    power_throttling)
+        finally:
+            set_execution_state(0x80000000)
 
     api_key = None
     if "llm" in args.modes:
@@ -373,19 +480,19 @@ def main():
 
     os.makedirs(RESULTS, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    env = environment(args.threads)
-    env["affinity"] = affinity
-    env["dataset"] = {"clips": len(clips), "mic": session.get("mic"),
-                      "calibration": session["calibration"]}
-    env["run"] = {
-        "configs": args.configs, "modes": args.modes, "repeats": args.repeats,
-        "threads": args.threads,
-        "endpoint_threshold": benchmark_threshold,
-        "endpoint_noise_multiplier": S.BENCHMARK_NOISE_MULTIPLIER,
-        "endpoint_silence_duration": S.BENCHMARK_SILENCE_DURATION,
-        "shared_endpointing": True,
-    }
-    if not args.worker:
+    env = None if args.worker else environment(args.threads)
+    if env is not None:
+        env["affinity"] = affinity
+        env["dataset"] = {"clips": len(clips), "mic": session.get("mic"),
+                          "calibration": session["calibration"]}
+        env["run"] = {
+            "configs": args.configs, "modes": args.modes, "repeats": args.repeats,
+            "threads": args.threads, "decoding": S.DECODING,
+            "endpoint_threshold": benchmark_threshold,
+            "endpoint_noise_multiplier": S.BENCHMARK_NOISE_MULTIPLIER,
+            "endpoint_silence_duration": S.BENCHMARK_SILENCE_DURATION,
+            "shared_endpointing": True,
+        }
         with open(os.path.join(RESULTS, f"env_{stamp}.json"), "w", encoding="utf-8") as f:
             json.dump(env, f, indent=2)
     out_path = args.worker_output or os.path.join(RESULTS, f"runs_{stamp}.csv")
@@ -393,7 +500,8 @@ def main():
     writer = csv.DictWriter(out, fieldnames=FIELDS)
     writer.writeheader()
 
-    print(f"CPU: {env['cpu']} | {env['logical_cores']} threads | RAM {env['ram_gb']} GB")
+    if env is not None:
+        print(f"CPU: {env['cpu']} | {env['logical_cores']} threads | RAM {env['ram_gb']} GB")
     print(f"{len(clips)} klip x {len(args.configs)} config x {args.repeats} ulangan, mode: {args.modes}")
 
     audio_cache = {c["clip_id"]: read_wav(os.path.join(DATA, "audio", c["file"])) for c in clips}
@@ -432,10 +540,12 @@ def main():
     for model_key, cfg_names in by_model.items():
         backend, model_name, precision = model_key
         gc.collect()
-        rss_before = rss_mb(proc)
+        baseline_rss = rss_mb(proc)
+        baseline_rss_mb = round(baseline_rss, 1)
         print(f"\nMemuat {backend} {model_name} ({precision}) ...")
         model = core.load_model(S.CONFIGS[cfg_names[0]])
-        model_rss = rss_mb(proc) - rss_before
+        model_rss = rss_mb(proc) - baseline_rss
+        compute_type_effective = effective_compute_type(model, S.CONFIGS[cfg_names[0]])
         # One unrecorded warm-up per config prevents lazy initialization from
         # entering the measured transcription latency.
         for warm_cfg_name in cfg_names:
@@ -518,6 +628,8 @@ def main():
                             "n_tokens": transcribe_info["n_tokens"],
                             "t_transcribe_s": round(t_tr, 4), "cores_transcribe": round(cores, 3),
                             **resource_info,
+                            "cores_average": round(
+                                resource_info["cpu_process_average_percent"] / 100.0, 3),
                             "t_intent_s": round(t_int, 9), "t_action_s": round(t_act, 9),
                             "latency_after_speech_s": None if total is None else round(total, 4),
                             "llm_error": info["error"],
@@ -525,6 +637,8 @@ def main():
                             "llm_completion_tokens": info["completion_tokens"],
                             "model_rss_mb": round(model_rss, 1),
                             "process_rss_mb": resource_info["peak_rss_mb"],
+                            "baseline_rss_mb": baseline_rss_mb,
+                            "compute_type_effective": compute_type_effective,
                         })
                     out.flush()
                     mins = (time.time() - t_start) / 60

@@ -211,7 +211,8 @@ def transcribe(model, audio, cfg, return_info=False):
         segments, _ = model.transcribe(
             audio, language=cfg.get("language", "en"), temperature=0,
             condition_on_previous_text=False,
-            initial_prompt=cfg.get("vocab_prompt"),
+            initial_prompt=cfg.get("vocab_prompt"), beam_size=1, best_of=1,
+            vad_filter=False,
         )
         segments = list(segments)
         text = "".join(segment.text for segment in segments).strip()

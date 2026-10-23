@@ -1,54 +1,76 @@
 # VoiceBridge Research
 
-VoiceBridge adalah pipeline voice command lokal: microphone -> endpointing -> Whisper -> intent parser -> browser action.
-
-Workflow utama untuk penelitian ada di [benchmark/guide.md](benchmark/guide.md). Folder `deepseek/` dan `local_rule/` adalah implementasi lama yang dipertahankan sebagai arsip.
-
-## Struktur utama
+VoiceBridge is a fully local voice-command pipeline:
 
 ```text
-benchmark/                  # workflow eksperimen yang digunakan untuk PPT
-benchmark/settings.py       # konfigurasi C1, C2, C3, C3n, C3z, C4, C5
-benchmark/commands.csv      # ground truth perintah pengujian
-benchmark/run_benchmark.py  # menjalankan benchmark
-benchmark/analyze_results.py# membuat laporan dan grafik
-PPT_ALIGNMENT_CHECKLIST.md  # status kesesuaian code dengan PPT
+microphone -> endpointing -> Whisper (ASR) -> intent parser -> browser action
 ```
 
-## Mulai cepat
+This repository benchmarks how model size, quantization, and audio preprocessing affect accuracy, latency, and resource use on a CPU-only laptop.
 
-1. Siapkan Python dan dependency dari `benchmark/requirements.txt`.
-2. Ikuti tutorial pengujian di [benchmark/guide.md](benchmark/guide.md).
-3. Jangan commit `benchmark/.env`; file itu berisi credential dan sudah di-ignore Git.
+## Repository layout
 
-## Definisi Pengukuran
+| Path | Purpose |
+|---|---|
+| `benchmark/` | Current experiment pipeline (used for the paper and slides) |
+| `benchmark/guide.md` | Step-by-step setup, recording, and benchmark guide |
+| `benchmark/settings.py` | Configurations C1–C5 |
+| `benchmark/commands.csv` | Ground-truth test commands |
+| `PPT_ALIGNMENT_CHECKLIST.md` | Status of each paper/slide claim |
+| `deepseek/`, `local_rule/` | Legacy prototypes (archived) |
 
-Semua angka utama untuk PPT dibuat oleh benchmark v2. Detail prosedur dan command ada di [benchmark/guide.md](benchmark/guide.md).
+## Quick start (Windows)
 
-- **WER:** reference berasal dari `commands.csv[text]`, hypothesis berasal dari transcript Whisper. Keduanya dinormalisasi lalu dibandingkan dengan dynamic programming pada seluruh kata. `WER = (substitution + deletion + insertion) / jumlah kata reference`.
-- **Endpointing benchmark:** setiap clip dipotong satu kali sebelum loop konfigurasi. Threshold bersama adalah `2.5 x noise_block_norm_p95` dan silence duration bersama `0.6 s`, sehingga semua konfigurasi menerima segment audio identik. Threshold/silence per-config hanya dipakai demo live. `endpoint_wait_s` adalah waktu dari blok keras terakhir sampai endpoint berhenti.
-- **Transcription latency:** dimulai tepat sebelum `core.transcribe()` dan berhenti ketika transcript selesai. Ini mencakup preprocessing dan inferensi Whisper, tetapi tidak mencakup endpointing, intent, atau browser.
-- **Encoder/decoder:** forward hook mengukur `model.encoder` dan `model.decoder` OpenAI Whisper selama transkripsi. `n_tokens` berasal dari token segment hasil Whisper.
-- **Intent latency:** dimulai sebelum `intent_rule()` atau `intent_llm()` dan berhenti setelah intent/query dikembalikan. Transkripsi dan browser tidak termasuk.
-- **Latency setelah bicara:** `endpoint_wait_s + t_transcribe_s + t_intent_s + t_action_s`. Browser tidak dibuka dalam benchmark utama.
-- **Task success:** sukses jika intent benar dan query benar. Query harus memuat semua content word expected dan maksimal dua content word tambahan.
-- **CPU average:** selama transkripsi, sampler mengambil process CPU time dari process tree (proses utama dan child process). Rumus raw yang disimpan adalah:
+```powershell
+cd benchmark
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env    # add an OpenRouter key for LLM mode; never commit .env
 
-	```text
-	cpu_process_average_percent =
-			((process_cpu_time_after - process_cpu_time_before)
-			 / transcription_wall_time) x 100
-	```
+.\1_cek_setup.bat         # check dependencies, mic, models
+.\2_rekam.bat             # record the 39-clip dataset
+.\3_benchmark.bat         # run all configurations
+.\4_analisis.bat          # build report and charts
+.\5_demo_live.bat         # live demo (C3, rule-based)
+```
 
-	`process_cpu_time_*` adalah jumlah detik user + system CPU dari `psutil.Process(os.getpid())` dan child process. `transcription_wall_time` dimulai tepat sebelum `core.transcribe()` dan berhenti setelah transcript selesai. Karena CPU time dapat berjalan pada beberapa core, hasil raw bisa lebih dari 100%. Contoh `250%` berarti kira-kira 2.5 core terpakai rata-rata selama fase transcription.
+Full details: [benchmark/guide.md](benchmark/guide.md).
 
-	`cpu_process_average_normalized_percent` dihitung sebagai `raw / logical_core_count`, dibatasi 0-100%. Contoh pada 12 logical core: `250% / 12 = 20.83%`.
+## Configurations
 
-	`cpu_process_raw_peak_percent` dan `cpu_process_normalized_peak_percent` adalah nilai peak dari sampling interval 75 ms. `cpu_system_peak_percent` adalah CPU seluruh sistem dan hanya digunakan untuk mendeteksi gangguan aplikasi lain.
-- **Memory:** `peak_rss_mb` adalah peak RSS process tree selama transcription. `model_rss_mb` adalah kenaikan RSS saat model dimuat di subprocess model yang bersih; `process_rss_mb` dipertahankan sebagai alias peak RSS.
-- **Model isolation:** setiap grup `openai-whisper base`, `openai-whisper tiny`, `faster-whisper tiny INT8`, dan `faster-whisper base INT8` berjalan di subprocess Python terpisah. Parent hanya menggabungkan worker CSV, sehingga RSS antar-model tidak tercampur. Setiap config mendapat satu warm-up yang tidak dicatat dan waktu loading model tidak masuk latency.
-- **CPU affinity:** pada Windows hybrid CPU, `detect_p_cores()` membaca `all_cpu_efficiency_classes` dari Windows CPU Set API. `EfficiencyClass` terbesar dipilih sebagai P-core. Pada i3-1220P, pemetaan yang diharapkan adalah logical index `0-3` sebagai P-core dan `4-11` sebagai E-core. Affinity diterapkan ke parent dan worker, lalu disimpan di `env.json` bersama `p_core_indices` dan `applied_affinity`. Standard benchmark memakai 2 thread untuk Torch dan faster-whisper.
-- **Normalized CPU bukan pembagian P-core:** nilai `*_normalized_*` dibagi `logical_core_count` (12 logical core pada mesin ini), bukan 4 P-core. Affinity hanya membatasi CPU yang boleh dipakai; denominator normalisasi tetap jumlah logical core sistem.
-- **Decoding:** semua backend memakai mode greedy. OpenAI Whisper membiarkan `beam_size=None`; faster-whisper menerima `beam_size=1`, `best_of=1`, dan `vad_filter=False`.
-- **Test output dan validasi:** `run_benchmark.py --test` menulis ke `benchmark/results/_test/`. `analyze_results.py --test` membaca folder itu. `validate_run.py` hanya membaca CSV/env dan menulis `validation_<stamp>.md` tanpa menjalankan model.
-- **Privacy:** `bytes_sent=0` untuk rule-based. Mode LLM mencatat ukuran JSON request; `audio_bytes` mencatat ukuran audio lokal yang tidak dikirim ke LLM.
+| Config | Backend | Model | Precision | Preprocessing |
+|---|---|---|---|---|
+| C1 | openai-whisper | base | FP32 | none |
+| C2 | openai-whisper | tiny | FP32 | none |
+| C3 | openai-whisper | tiny | FP32 | peak norm + vocabulary prompt |
+| C3n | openai-whisper | tiny | FP32 | peak norm (ablation, no prompt) |
+| C3z | openai-whisper | tiny | FP32 | z-score + vocabulary prompt |
+| C4 | faster-whisper | tiny | INT8 | peak norm + vocabulary prompt |
+| C5 | faster-whisper | base | INT8 | peak norm + vocabulary prompt |
+
+Each configuration runs with two intent parsers: **rule-based** (offline) and **LLM** (OpenRouter).
+
+## Metrics
+
+| Metric | Definition |
+|---|---|
+| WER | `(substitutions + deletions + insertions) / reference words`, after text normalization |
+| Task success | Correct intent **and** query contains all expected content words (≤ 2 extra) |
+| Transcription latency | Wall time of `core.transcribe()` (preprocessing + inference) |
+| Intent latency | Wall time of `intent_rule()` / `intent_llm()` |
+| End-to-end latency | `endpoint_wait + transcribe + intent + action` (browser not opened in benchmark) |
+| Encoder / decoder time | Forward hooks on Whisper encoder/decoder (openai-whisper only) |
+| CPU (raw) | `Δ process CPU time / transcription wall time × 100`; can exceed 100% on multiple cores |
+| CPU (normalized) | `raw / logical cores`, clamped to 0–100% |
+| Memory | Peak RSS of the process tree during transcription; `model_rss_mb` = RSS increase on model load |
+| Privacy | `bytes_sent` (0 for rule-based); `audio_bytes` = local audio never sent |
+
+## Methodology notes
+
+- **Identical input:** every clip is endpointed once (threshold `2.5 × noise p95`, silence `0.6 s`) before the config loop, so all configs see the same audio.
+- **Model isolation:** each backend/model group runs in its own Python subprocess, so memory readings do not mix.
+- **Warm-up:** one unrecorded warm-up per config; model loading is excluded from latency.
+- **Decoding:** greedy for both backends (`beam_size=1`, `best_of=1`, VAD off for faster-whisper).
+- **CPU pinning:** on Windows hybrid CPUs, P-cores are detected via the CPU Set API and affinity is applied; 2 threads are used. Normalization still divides by all logical cores.
+- **Audio:** recorded at the device rate (44.1/48 kHz) and downsampled to 16 kHz with `scipy.signal.resample_poly`.
